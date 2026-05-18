@@ -36,3 +36,15 @@ def parse_jma(filepath):
                     'pressure': pressure
             })
     return pd.DataFrame(data)
+
+
+def parse_wwlln(filepath):
+
+    df = pd.read_csv(filepath, sep=r'\s+', header=None, usecols=[0, 1, 2, 3, 4, 5, 6, 7],
+                     names=['year', 'month', 'day', 'hour', 'minute', 'second', 'lat', 'lon'])
+
+    df['second'] = df['second'].astype(int)
+
+    df['datetime'] = pd.to_datetime(df[['year', 'month', 'day', 'hour', 'minute', 'second']])
+
+    return df[['datetime', 'lat', 'lon']]
