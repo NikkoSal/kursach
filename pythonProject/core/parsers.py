@@ -16,9 +16,9 @@ def parse_jma(filepath):
                 current_cyclone_id = parts[1]
             else:
                 date_str = parts[0]
-                lat = float(parts[3]) / 10.0  # Широта
-                lon = float(parts[4]) / 10.0  # Долгота
-                pressure = int(parts[5])  # Давление
+                lat = float(parts[3]) / 10.0
+                lon = float(parts[4]) / 10.0
+                pressure = int(parts[5])
 
                 year_part = int(date_str[:2])
                 year = 1900 + year_part if year_part > 50 else 2000 + year_part

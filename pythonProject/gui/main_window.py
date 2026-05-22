@@ -8,14 +8,16 @@ from visual.plotter import CyclonePlotCanvas
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from visual.map_builder import build_interactive_map
+from core.analyzer import haversine_array
 import os
+import pandas as pd
 
 
 class CycloneApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Анализ влияния ТЦ на молниевую активность")
-        self.resize(1100, 650)
+        self.resize(1200, 700)
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -42,7 +44,6 @@ class CycloneApp(QMainWindow):
         self.combo_region.addItems(["Японское море", "Южно-Китайское море", "Свой регион"])
 
         coord_layout = QHBoxLayout()
-
         col1 = QVBoxLayout()
         self.spin_lat_min = QDoubleSpinBox();
         self.spin_lat_min.setRange(-90, 90)
@@ -60,7 +61,6 @@ class CycloneApp(QMainWindow):
         col2.addWidget(QLabel("Долгота (Мин/Макс):"))
         col2.addWidget(self.spin_lon_min)
         col2.addWidget(self.spin_lon_max)
-
         coord_layout.addLayout(col1)
         coord_layout.addLayout(col2)
 
@@ -75,7 +75,7 @@ class CycloneApp(QMainWindow):
         self.spin_top_zones = QSpinBox()
         self.spin_top_zones.setRange(1, 50)
         self.spin_top_zones.setValue(5)
-        self.spin_top_zones.setSuffix(" зон ")
+        self.spin_top_zones.setSuffix(" зон")
 
         param_layout.addWidget(QLabel("Регион исследования:"))
         param_layout.addWidget(self.combo_region)
@@ -88,6 +88,13 @@ class CycloneApp(QMainWindow):
         param_layout.addWidget(self.spin_top_zones)
         param_group.setLayout(param_layout)
 
+        self.tc_selector_layout = QVBoxLayout()
+        self.tc_selector_layout.addWidget(QLabel("<b>Выберите тайфун для просмотра:</b>"))
+        self.combo_tc_selector = QComboBox()
+        self.combo_tc_selector.setEnabled(False)
+        self.combo_tc_selector.currentIndexChanged.connect(self.update_detail_views)
+        self.tc_selector_layout.addWidget(self.combo_tc_selector)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         self.btn_run = QPushButton("CALCULATE IMPACT")
@@ -97,11 +104,19 @@ class CycloneApp(QMainWindow):
         left_panel.addWidget(file_group)
         left_panel.addWidget(param_group)
         left_panel.addStretch()
+        left_panel.addLayout(self.tc_selector_layout)
         left_panel.addWidget(self.progress_bar)
         left_panel.addWidget(self.btn_run)
 
         right_panel = QVBoxLayout()
         self.tabs = QTabWidget()
+
+        self.tab_stats = QWidget()
+        stats_layout = QVBoxLayout(self.tab_stats)
+        self.stats_log = QTextEdit()
+        self.stats_log.setReadOnly(True)
+        stats_layout.addWidget(self.stats_log)
+        self.tabs.addTab(self.tab_stats, "Сводная статистика")
 
         self.tab_map = QWidget()
         map_layout = QVBoxLayout(self.tab_map)
@@ -109,22 +124,17 @@ class CycloneApp(QMainWindow):
         self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
-        self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True)
         map_layout.addWidget(self.web_view)
+        self.tabs.addTab(self.tab_map, "Интерактивная карта")
 
         self.tab_plot = QWidget()
         plot_layout = QVBoxLayout(self.tab_plot)
         self.plot_canvas = CyclonePlotCanvas(self, width=8, height=6, dpi=100)
         plot_layout.addWidget(self.plot_canvas)
+        self.tabs.addTab(self.tab_plot, "График ТЦ")
 
         self.tab_log = QWidget()
         log_layout = QVBoxLayout(self.tab_log)
-
-        self.log_area = QTextEdit()
-        self.log_area.setReadOnly(True)
-        self.log_area.setMinimumHeight(120)
-        self.log_area.setMaximumHeight(180)
-        log_layout.addWidget(self.log_area)
 
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(4)
@@ -133,14 +143,11 @@ class CycloneApp(QMainWindow):
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         log_layout.addWidget(self.table_widget)
 
-        self.btn_export = QPushButton("Экспорт результатов в CSV")
+        self.btn_export = QPushButton("💾 Экспорт таблицы в CSV")
         self.btn_export.setEnabled(False)
         self.btn_export.clicked.connect(self.export_data)
         log_layout.addWidget(self.btn_export)
-
-        self.tabs.addTab(self.tab_map, "Интерактивная карта")
-        self.tabs.addTab(self.tab_plot, "График")
-        self.tabs.addTab(self.tab_log, "Журнал и Данные")
+        self.tabs.addTab(self.tab_log, "Детализация ТЦ")
 
         right_panel.addWidget(self.tabs)
 
@@ -155,6 +162,9 @@ class CycloneApp(QMainWindow):
         self.jma_path = "data/bst_all.txt"
         self.wwlln_path = "data/JS202209_U.dat"
         self.change_region()
+
+        self.all_results = []
+        self.light_df = None
 
     def change_region(self):
         region = self.combo_region.currentText()
@@ -174,30 +184,32 @@ class CycloneApp(QMainWindow):
             self.toggle_coords(True)
 
     def toggle_coords(self, enable):
-        self.spin_lat_min.setEnabled(enable)
+        self.spin_lat_min.setEnabled(enable);
         self.spin_lat_max.setEnabled(enable)
-        self.spin_lon_min.setEnabled(enable)
+        self.spin_lon_min.setEnabled(enable);
         self.spin_lon_max.setEnabled(enable)
 
     def load_jma(self):
         path, _ = QFileDialog.getOpenFileName(self, "Выберите файл JMA", "", "Text Files (*.txt);;All Files (*)")
         if path:
-            self.jma_path = path
+            self.jma_path = path;
             self.lbl_jma.setText(path.split('/')[-1])
 
     def load_wwlln(self):
         path, _ = QFileDialog.getOpenFileName(self, "Выберите файл WWLLN", "",
                                               "Data Files (*.dat *.loc);;All Files (*)")
         if path:
-            self.wwlln_path = path
+            self.wwlln_path = path;
             self.lbl_wwlln.setText(path.split('/')[-1])
 
     def start_analysis(self):
         self.btn_run.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.log_area.clear()
-        self.table_widget.setRowCount(0)
-        self.tabs.setCurrentIndex(2)
+        self.stats_log.clear()
+        self.combo_tc_selector.clear()
+        self.combo_tc_selector.setEnabled(False)
+        self.btn_export.setEnabled(False)
+        self.tabs.setCurrentIndex(0)
 
         tc_id = self.input_tc_id.text().strip()
         radius = self.spin_radius.value()
@@ -206,31 +218,51 @@ class CycloneApp(QMainWindow):
 
         self.worker = AnalysisWorker(self.jma_path, self.wwlln_path, tc_id, radius, coords)
         self.worker.progress.connect(self.progress_bar.setValue)
-        self.worker.log.connect(self.log_area.append)
+        self.worker.log.connect(self.stats_log.append)
         self.worker.error.connect(self.show_error)
-        self.worker.finished.connect(self.process_results)
+        self.worker.finished.connect(self.process_all_results)
         self.worker.start()
 
     def show_error(self, err_msg):
-        self.log_area.append(f"ОШИБКА: {err_msg}")
+        self.stats_log.append(f"ОШИБКА: {err_msg}")
         self.btn_run.setEnabled(True)
 
-    def export_data(self):
-        if not hasattr(self, 'current_result') or self.current_result is None: return
-        filepath, _ = QFileDialog.getSaveFileName(self, "Сохранить результаты", "cyclone_result.csv",
-                                                  "CSV Files (*.csv)")
-        if filepath:
-            export_df = self.current_result[['datetime', 'lat', 'lon', 'pressure', 'lightning_count']]
-            export_df.to_csv(filepath, index=False, sep=';')
-            self.log_area.append(f"Успешно сохранено: {filepath}")
-
-    def process_results(self, data):
-        result_df, light_df = data
-        self.current_result = result_df
+    def process_all_results(self, data):
+        self.all_results, self.light_df = data
         self.btn_export.setEnabled(True)
 
-        active = result_df[result_df['lightning_count'] > 0]
+        self.stats_log.append(f"Общее количество молний в заданном регионе: {len(self.light_df)}")
 
+        self.combo_tc_selector.blockSignals(True)
+        self.combo_tc_selector.clear()
+
+        for item in self.all_results:
+            tc_id = item['tc_id']
+
+            self.stats_log.append(f"\nАнализ тропического циклона (ID: {tc_id})")
+            self.stats_log.append("Общая активность:")
+            self.stats_log.append(f"Зафиксировано молний в зоне влияния ТЦ: {item['total_tc']}")
+            self.stats_log.append(f" Доля ТЦ от региональной активности: {item['perc_total']:.1f}%")
+            self.stats_log.append("\nПиковые дни грозовой активности:")
+
+            for line in item['peaks']:
+                self.stats_log.append(line)
+
+            self.combo_tc_selector.addItem(f"Тайфун {tc_id} ({item['total_tc']} молний)")
+
+        self.combo_tc_selector.blockSignals(False)
+        self.combo_tc_selector.setEnabled(True)
+        self.btn_run.setEnabled(True)
+
+        self.update_detail_views()
+    def update_detail_views(self):
+        current_idx = self.combo_tc_selector.currentIndex()
+        if current_idx < 0 or current_idx >= len(self.all_results):
+            return
+
+        selected_df = self.all_results[current_idx]['track_df']
+
+        active = selected_df[selected_df['lightning_count'] > 0]
         self.table_widget.setRowCount(0)
         self.table_widget.setSortingEnabled(False)
 
@@ -245,11 +277,9 @@ class CycloneApp(QMainWindow):
 
                 item_dt = QTableWidgetItem(dt_str)
                 item_coord = QTableWidgetItem(coord_str)
-
-                item_press = QTableWidgetItem()
+                item_press = QTableWidgetItem();
                 item_press.setData(Qt.ItemDataRole.DisplayRole, int(row['pressure']))
-
-                item_light = QTableWidgetItem()
+                item_light = QTableWidgetItem();
                 item_light.setData(Qt.ItemDataRole.DisplayRole, int(row['lightning_count']))
 
                 self.table_widget.setItem(row_idx, 0, item_dt)
@@ -260,14 +290,25 @@ class CycloneApp(QMainWindow):
             self.table_widget.setSortingEnabled(True)
             self.table_widget.sortItems(3, Qt.SortOrder.DescendingOrder)
 
+        self.plot_canvas.plot_data(selected_df)
+
         radius = self.spin_radius.value()
         top_zones = self.spin_top_zones.value()
-        map_filepath = build_interactive_map(result_df, light_df, radius, top_zones)
+        map_filepath = build_interactive_map(selected_df, self.light_df, radius, top_zones)
 
         abs_path = os.path.abspath(map_filepath)
         self.web_view.load(QUrl.fromLocalFile(abs_path))
 
-        self.plot_canvas.plot_data(result_df)
+    def export_data(self):
+        current_idx = self.combo_tc_selector.currentIndex()
+        if current_idx < 0: return
 
-        self.tabs.setCurrentIndex(2)
-        self.btn_run.setEnabled(True)
+        selected_df = self.all_results[current_idx]['track_df']
+        tc_id = self.all_results[current_idx]['tc_id']
+
+        filepath, _ = QFileDialog.getSaveFileName(self, "Сохранить результаты", f"cyclone_{tc_id}.csv",
+                                                  "CSV Files (*.csv)")
+        if filepath:
+            export_df = selected_df[['datetime', 'lat', 'lon', 'pressure', 'lightning_count']]
+            export_df.to_csv(filepath, index=False, sep=';')
+            self.stats_log.append(f"Успешно сохранено: {filepath}")
