@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import scipy
+from scipy.interpolate import pchip_interpolate
 
 def haversine_array(lat1, lon1, lat2_array, lon2_array):
     lat1, lon1, lat2_array, lon2_array = map(np.radians, [lat1, lon1, lat2_array, lon2_array])
@@ -14,31 +14,37 @@ def haversine_array(lat1, lon1, lat2_array, lon2_array):
 
 def interpolate_track(tc_track, freq='1h'):
     df = tc_track.copy()
-    df = df.set_index('datetime')
-    df = df[~df.index.duplicated(keep='first')]
-    resampled = df.resample(freq).asfreq()
+
+    df = df.sort_values(by='datetime')
+    df = df[~df['datetime'].duplicated(keep='first')]
+
+    base_times = (df['datetime'] - df['datetime'].iloc[0]).dt.total_seconds() / 3600.0
+
+    start_time = df['datetime'].min()
+    end_time = df['datetime'].max()
+    new_dates = pd.date_range(start=start_time, end=end_time, freq=freq)
+
+    new_times = (new_dates - start_time).total_seconds() / 3600.0
 
     valid_points = df['lat'].dropna().shape[0]
 
-    if valid_points >= 4:
-        try:
-            resampled['lat'] = resampled['lat'].interpolate(method='spline', order=3)
-            resampled['lon'] = resampled['lon'].interpolate(method='spline', order=3)
-            resampled['pressure'] = resampled['pressure'].interpolate(method='spline', order=3)
-        except ImportError:
-            resampled['lat'] = resampled['lat'].interpolate(method='linear')
-            resampled['lon'] = resampled['lon'].interpolate(method='linear')
-            resampled['pressure'] = resampled['pressure'].interpolate(method='linear')
+    resampled = pd.DataFrame({'datetime': new_dates})
+
+    if valid_points >= 3:
+        resampled['lat'] = pchip_interpolate(base_times, df['lat'].values, new_times)
+        resampled['lon'] = pchip_interpolate(base_times, df['lon'].values, new_times)
+        resampled['pressure'] = pchip_interpolate(base_times, df['pressure'].values, new_times)
     else:
-        resampled['lat'] = resampled['lat'].interpolate(method='linear')
-        resampled['lon'] = resampled['lon'].interpolate(method='linear')
-        resampled['pressure'] = resampled['pressure'].interpolate(method='linear')
+        resampled['lat'] = np.interp(new_times, base_times, df['lat'].values)
+        resampled['lon'] = np.interp(new_times, base_times, df['lon'].values)
+        resampled['pressure'] = np.interp(new_times, base_times, df['pressure'].values)
 
-    resampled['tc_id'] = resampled['tc_id'].ffill()
-    return resampled.reset_index()
+    resampled['tc_id'] = df['tc_id'].iloc[0]
+
+    return resampled
 
 
-def analyze_lightning_impact(tc_track, lightning_df, radius_km=500, time_window_hours=3.0):
+def analyze_lightning_impact(tc_track, lightning_df, radius_km=500, time_window_hours=0.5):
     counts = []
     caught_indices = set()
     for _, row in tc_track.iterrows():
